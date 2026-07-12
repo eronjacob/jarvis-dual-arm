@@ -479,10 +479,10 @@ During an early power-on test, a DC bridge adapter borrowed from the Jennison la
 ## Licence
 
 Released for educational and research purposes.  
-© 2026 Eron Jacob O. Buenaflor — University of Kent EENG6010
+© 2026 Eron Jacob O. Buenaflor — University of Kent
 
 ---
 
 <div align="center">
-<sub>⚙ &nbsp; J.A.R.V.I.S. PROTOCOL · UNIVERSITY OF KENT · SCHOOL OF ENGINEERING &nbsp; ⚙</sub>
+<sub>⚙ &nbsp; J.A.R.V.I.S. PROTOCOL &nbsp; ⚙</sub>
 </div>
