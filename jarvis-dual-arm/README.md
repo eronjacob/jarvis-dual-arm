@@ -1,9 +1,7 @@
 # J.A.R.V.I.S. — Coordinated Dual-Arm Robotic System
 
-> **EENG6010 Final Year Engineering Project**  
-> University of Kent, School of Engineering  
-> *Eron Jacob O. Buenaflor — eb546*  
-> Supervised by Dr. Xinggang Yan
+> **Final Year Engineering Project**   
+> *Eron Jacob O. Buenaflor*  
 
 ---
 
