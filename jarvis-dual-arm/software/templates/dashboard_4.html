@@ -1,0 +1,359 @@
+<!--
+  dashboard_4.html — J.A.R.V.I.S. Dual Arm Monitor (Coordinated Pick-and-Place Task)
+  University of Kent — EENG6010
+
+  Served by robot_voice_6.py Flask server at http://127.0.0.1:5001
+
+  Additional features over dashboard_3.html:
+    • "SYNCHRONISED PICK" overlay badge — visible during bilateral motion phases
+    • Amber gripper glow on both arms during grab / lift / hold / lower phases
+    • Amber pulse on inter-gripper distance bar during active bilateral grip
+    • Recursive setTimeout polling (replaces setInterval) — prevents network backup
+      during high-frequency LERP telemetry from coordinatedMove()
+    • Faster display LERP factor (exp(-40*delta)) for tighter tracking of fast moves
+-->
+<!DOCTYPE html>
+<html>
+<head>
+  <title>J.A.R.V.I.S. Dual Arm Monitor</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #070710; color: #00ff88; font-family: 'Courier New', monospace; overflow-x: hidden; }
+
+    h1 { color: #00ccff; text-align: center; letter-spacing: 6px; font-size: 18px; padding: 12px 0; border-bottom: 1px solid #1a1a2e; text-shadow: 0 0 10px #00ccff; }
+
+    .main-visual-row { display: flex; gap: 16px; padding: 16px; align-items: flex-start; border-bottom: 1px solid #1a1a2e; }
+
+    #three-container { flex: 1; min-width: 0; height: 460px; position: relative; border-right: 1px solid #1a1a2e; }
+    #three-canvas { width: 100%; height: 100%; display: block; }
+
+    #connection-badge {
+      position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
+      padding: 4px 14px; border-radius: 20px; font-size: 11px; letter-spacing: 1px;
+      border: 1px solid #333; background: #0d0d1a; z-index: 10; white-space: nowrap;
+      transition: color .3s, border-color .3s, text-shadow .3s;
+    }
+
+    /* Synchronised mode badge — fades in during bilateral motion phases */
+    #sync-badge {
+      position: absolute; top: 42px; left: 50%; transform: translateX(-50%);
+      padding: 3px 12px; border-radius: 20px; font-size: 10px; letter-spacing: 2px;
+      border: 1px solid #ffaa00; background: rgba(13,13,26,0.9); color: #ffaa00;
+      text-shadow: 0 0 6px #ffaa00; z-index: 10; white-space: nowrap;
+      opacity: 0; transition: opacity .4s; pointer-events: none;
+    }
+    #sync-badge.visible { opacity: 1; }
+
+    #action-display {
+      position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%);
+      padding: 6px 20px; border-radius: 4px; font-size: 13px; letter-spacing: 2px;
+      color: #ffcc00; text-shadow: 0 0 3px #ffcc00; background: rgba(13,13,26,0.85);
+      border: 1px solid #333; white-space: nowrap; z-index: 10;
+      transition: color .3s, text-shadow .3s;
+    }
+    #action-display.sync { color: #ffaa00; text-shadow: 0 0 10px #ffaa00; }
+
+    .bars-section { display: flex; flex-direction: column; gap: 16px; flex-shrink: 0; }
+    .arm-panel { border: 1px solid #00ff88; border-radius: 10px; padding: 14px; width: 360px; background: #0a0a18; }
+    .arm-panel.right { border-color: #ff4444; }
+    .arm-panel h2 { color: #00ccff; font-size: 12px; letter-spacing: 3px; border-bottom: 1px solid #1a1a2e; padding-bottom: 6px; margin-bottom: 10px; }
+    .arm-panel.right h2 { color: #ff4444; }
+    .servo-row { margin: 7px 0; }
+    .servo-label { color: #888; font-size: 10px; letter-spacing: 1px; margin-bottom: 3px; }
+    .bar-bg { background: #111; border-radius: 3px; height: 18px; border: 1px solid #1a1a2e; overflow: hidden; }
+    .bar-fill { height: 100%; border-radius: 2px; background: linear-gradient(90deg,#00ccff,#00ff88); transition: width 0.08s ease; display: flex; align-items: center; padding-left: 6px; font-size: 10px; color: #000; font-weight: bold; min-width: 28px; }
+    .arm-panel.right .bar-fill { background: linear-gradient(90deg,#ff4444,#ff8844); }
+
+    .footer { text-align: center; color: #444; font-size: 10px; padding: 12px; letter-spacing: 2px; }
+
+    #metrics-strip { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; justify-content: center; padding: 12px 16px; border-top: 1px solid #1a1a2e; border-bottom: 1px solid #1a1a2e; background: rgba(10,10,24,0.95); font-size: 11px; letter-spacing: 1px; }
+    #metrics-strip .metric { color: #8ab4ff; white-space: nowrap; }
+    #metrics-strip .metric strong { color: #00ff88; font-weight: bold; }
+
+    .distance-strip-row { display: flex; flex-direction: column; gap: 4px; min-width: 140px; }
+    .distance-strip-row span.lbl { color: #666; font-size: 9px; text-transform: uppercase; }
+    .dist-meter { height: 8px; background: #111; border-radius: 4px; border: 1px solid #1a1a2e; overflow: hidden; }
+    .dist-meter-fill { height: 100%; border-radius: 3px; transition: width 0.15s ease, background 0.3s ease; min-width: 2px; }
+    .dist-meter-fill.left  { background: linear-gradient(90deg,#00ccff,#00ff88); }
+    .dist-meter-fill.right { background: linear-gradient(90deg,#ff4444,#ff8844); }
+    .dist-meter-fill.inter { background: linear-gradient(90deg,#a855f7,#eab308); }
+    /* Amber pulse when both grippers are simultaneously holding the payload */
+    .dist-meter-fill.inter.gripping { background: linear-gradient(90deg,#ff6600,#ffcc00); box-shadow: 0 0 6px #ffaa00; }
+
+    .charts-section { padding: 16px; display: grid; grid-template-columns: repeat(auto-fit,minmax(280px,1fr)); gap: 14px; max-width: 1400px; margin: 0 auto; }
+    .chart-card { background: #0a0a18; border: 1px solid #1a1a2e; border-radius: 10px; padding: 12px; min-height: 200px; }
+    .chart-card h3 { color: #00ccff; font-size: 11px; letter-spacing: 2px; margin-bottom: 8px; text-transform: uppercase; }
+    .chart-card canvas { width: 100% !important; height: 180px !important; }
+
+    @media (max-width: 900px) {
+      .main-visual-row { flex-direction: column; align-items: center; }
+      #three-container { width: 100%; flex: 0 0 auto; border-right: none; border-bottom: 1px solid #1a1a2e; }
+      .bars-section { width: 100%; align-items: center; }
+    }
+  </style>
+</head>
+<body>
+
+<h1>&nbsp; J.A.R.V.I.S. DUAL ARM MONITOR &nbsp;</h1>
+
+<div class="main-visual-row">
+  <div id="three-container">
+    <canvas id="three-canvas"></canvas>
+    <div id="connection-badge">Connecting...</div>
+    <div id="sync-badge">⚡ SYNCHRONIZED PICK</div>
+    <div id="action-display">Initializing...</div>
+  </div>
+  <div class="bars-section">
+    <div class="arm-panel left"><h2>&nbsp; LEFT ARM</h2><div id="left-bars"></div></div>
+    <div class="arm-panel right"><h2>RIGHT ARM &nbsp;</h2><div id="right-bars"></div></div>
+  </div>
+</div>
+
+<div id="metrics-strip">
+  <div class="metric">Elapsed <strong id="metric-elapsed">—</strong>s</div>
+  <div class="metric">Samples <strong id="metric-samples">0</strong></div>
+  <div class="metric">Actions logged <strong id="metric-actions">0</strong></div>
+  <div class="distance-strip-row">
+    <span class="lbl">Left dist (local min/max)</span>
+    <div class="dist-meter"><div class="dist-meter-fill left" id="strip-left" style="width:0%"></div></div>
+  </div>
+  <div class="distance-strip-row">
+    <span class="lbl">Right dist</span>
+    <div class="dist-meter"><div class="dist-meter-fill right" id="strip-right" style="width:0%"></div></div>
+  </div>
+  <div class="distance-strip-row">
+    <span class="lbl">Inter-gripper separation</span>
+    <div class="dist-meter"><div class="dist-meter-fill inter" id="strip-inter" style="width:0%"></div></div>
+  </div>
+</div>
+
+<div class="charts-section">
+  <div class="chart-card"><h3>Left gripper distance from base</h3><canvas id="chart-left-dist"></canvas></div>
+  <div class="chart-card"><h3>Right gripper distance from base</h3><canvas id="chart-right-dist"></canvas></div>
+  <div class="chart-card"><h3>Inter-gripper separation</h3><canvas id="chart-inter-dist"></canvas></div>
+  <div class="chart-card"><h3>Gripper vertical (scene Y)</h3><canvas id="chart-z"></canvas></div>
+</div>
+
+<div class="footer">J.A.R.V.I.S. PROTOCOL — UNIVERSITY OF KENT</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script>
+const HOME = {
+  0:85, 1:90, 2:91, 3:96, 4:90, 5:90,
+  10:93, 11:90, 12:90, 13:92, 14:90, 15:90
+};
+let targetAngles = JSON.parse(JSON.stringify(HOME));
+let currentDisplayAngles = JSON.parse(JSON.stringify(HOME));
+const LEFT_PINS=[0,1,2,3,4,5], RIGHT_PINS=[10,11,12,13,14,15];
+const SERVO_NAMES={0:'Base Rotation',1:'Shoulder',2:'Elbow',3:'Wrist Roll',4:'Wrist Pitch',5:'Gripper',10:'Base Rotation',11:'Shoulder',12:'Elbow',13:'Wrist Roll',14:'Wrist Pitch',15:'Gripper'};
+let servoAngles={}; Object.assign(servoAngles,HOME);
+let isSyncMode=false, isGripping=false;
+
+function buildBars(pins,id){
+  const div=document.getElementById(id); div.innerHTML='';
+  pins.forEach(p=>{div.innerHTML+=`<div class="servo-row"><div class="servo-label">${SERVO_NAMES[p]} <span style="color:#555;font-size:9px">home=${HOME[p]}°</span></div><div class="bar-bg"><div class="bar-fill" id="bar-${p}" style="width:${(HOME[p]/180*100).toFixed(1)}%">${HOME[p]}°</div></div></div>`;});
+}
+buildBars(LEFT_PINS,'left-bars'); buildBars(RIGHT_PINS,'right-bars');
+
+function updateBars(){
+  for(const pin in servoAngles){const bar=document.getElementById('bar-'+pin);if(!bar)continue;const a=servoAngles[pin];bar.style.width=Math.max(3,(a/180*100)).toFixed(1)+'%';bar.innerText=Math.round(a)+'°';}
+}
+
+// Three.js
+const canvas=document.getElementById('three-canvas');
+const renderer=new THREE.WebGLRenderer({canvas,antialias:true,alpha:true});
+renderer.setPixelRatio(Math.min(window.devicePixelRatio,2));
+renderer.setClearColor(0x070710,1);
+const scene=new THREE.Scene();
+const camera=new THREE.PerspectiveCamera(50,2,0.1,100);
+camera.position.set(6,5,6); camera.lookAt(0,3,0);
+function onResize(){const w=canvas.parentElement.clientWidth,h=canvas.parentElement.clientHeight;renderer.setSize(w,h,false);camera.aspect=w/h;camera.updateProjectionMatrix();}
+window.addEventListener('resize',onResize); onResize();
+scene.add(new THREE.GridHelper(14,28,0x1e293b,0x0f172a));
+scene.add(new THREE.AmbientLight(0xffffff,0.2));
+const ptL=new THREE.PointLight(0xffffff,0.5); ptL.position.set(5,10,5); scene.add(ptL);
+
+let isDragging=false,prevMouse={x:0,y:0},spherical={theta:Math.PI/4,phi:Math.PI/3,radius:11},autoRotate=true,idleTimer=0;
+canvas.addEventListener('mousedown',e=>{isDragging=true;autoRotate=false;idleTimer=0;prevMouse={x:e.clientX,y:e.clientY};});
+window.addEventListener('mouseup',()=>{isDragging=false;});
+window.addEventListener('mousemove',e=>{if(!isDragging)return;spherical.theta-=(e.clientX-prevMouse.x)*0.005;spherical.phi=Math.max(0.15,Math.min(Math.PI-0.15,spherical.phi+(e.clientY-prevMouse.y)*0.005));prevMouse={x:e.clientX,y:e.clientY};});
+canvas.addEventListener('wheel',e=>{spherical.radius=Math.max(4,Math.min(18,spherical.radius+e.deltaY*0.01));e.preventDefault();},{passive:false});
+
+function updateCamera(delta){
+  if(!isDragging){idleTimer+=delta;if(idleTimer>4)autoRotate=true;}
+  if(autoRotate) spherical.theta+=delta*0.25;
+  const t=new THREE.Vector3(0,3,0);
+  camera.position.set(t.x+spherical.radius*Math.sin(spherical.phi)*Math.sin(spherical.theta),t.y+spherical.radius*Math.cos(spherical.phi),t.z+spherical.radius*Math.sin(spherical.phi)*Math.cos(spherical.theta));
+  camera.lookAt(t);
+}
+
+function computeArmKeyPoints(pins,offsetX){
+  const sa=i=>servoAngles[pins[i]]??HOME[pins[i]];
+  const isLeft=pins[0]===0,sag=isLeft?+1:1;
+  const bYawScale=isLeft?0.55:0.58,bYawSign=isLeft?+1:-1;
+  const bDelta=(sa(0)-HOME[pins[0]])/90;
+  const bRad=bDelta*(Math.PI*bYawScale)*bYawSign;
+  const sTilt=(sa(1)-HOME[pins[1]])/90*Math.PI*0.75*sag;
+  const eTilt=-((sa(2)-HOME[pins[2]])/90*Math.PI*0.65)*sag;
+  const wTilt=-((sa(4)-HOME[pins[4]])/90*Math.PI*0.30)*sag;
+  const gDelta=(sa(3)-HOME[pins[3]])/90,gRad=gDelta*Math.PI*sag;
+  const clawOpen=(sa(5)/180)*0.45;
+  const origin=new THREE.Vector3(offsetX,0,0);
+  const baseTop=origin.clone().add(new THREE.Vector3(0,0.6,0));
+  const sDir=new THREE.Vector3(Math.sin(bRad)*Math.sin(sTilt),Math.cos(sTilt),Math.cos(bRad)*Math.sin(sTilt)).normalize();
+  const elbowPos=baseTop.clone().add(sDir.clone().multiplyScalar(2.0));
+  const cT=sTilt+eTilt;
+  const eDir=new THREE.Vector3(Math.sin(bRad)*Math.sin(cT),Math.cos(cT),Math.cos(bRad)*Math.sin(cT)).normalize();
+  const wristPos=elbowPos.clone().add(eDir.clone().multiplyScalar(1.6));
+  const wCT=cT+wTilt;
+  const wDir=new THREE.Vector3(Math.sin(bRad)*Math.sin(wCT),Math.cos(wCT),Math.cos(bRad)*Math.sin(wCT)).normalize();
+  const clawBase=wristPos.clone().add(wDir.clone().multiplyScalar(0.8));
+  let pX=new THREE.Vector3(1,0,0).cross(wDir).normalize();
+  if(pX.length()<0.01)pX.set(1,0,0); pX.normalize(); pX.applyAxisAngle(wDir,gRad);
+  const prong1=clawBase.clone().add(wDir.clone().multiplyScalar(0.4)).add(pX.clone().multiplyScalar(clawOpen));
+  const prong2=clawBase.clone().add(wDir.clone().multiplyScalar(0.4)).add(pX.clone().multiplyScalar(-clawOpen));
+  return{origin,baseTop,elbowPos,wristPos,clawBase,prong1,prong2,clawAngle:sa(5)};
+}
+
+function buildArmPoints(kp){
+  const pts=[];
+  function seg(a,b,n){for(let i=0;i<=n;i++)pts.push(a.clone().lerp(b,i/n));}
+  seg(kp.origin,kp.baseTop,4);seg(kp.baseTop,kp.elbowPos,12);seg(kp.elbowPos,kp.wristPos,10);seg(kp.wristPos,kp.clawBase,5);seg(kp.clawBase,kp.prong1,4);seg(kp.clawBase,kp.prong2,4);
+  for(let i=0;i<24;i++){const a=(i/24)*Math.PI*2;pts.push(new THREE.Vector3(kp.origin.x+Math.cos(a)*0.45,Math.random()*0.05,kp.origin.z+Math.sin(a)*0.45));}
+  [kp.baseTop,kp.elbowPos,kp.wristPos].forEach(j=>{for(let i=0;i<4;i++)pts.push(j.clone().add(new THREE.Vector3((Math.random()-.5)*.14,(Math.random()-.5)*.14,(Math.random()-.5)*.14)));});
+  return pts;
+}
+
+const PC=130;
+function createArmObjects(color){
+  const geo=new THREE.BufferGeometry();
+  geo.setAttribute('position',new THREE.BufferAttribute(new Float32Array(PC*3),3));
+  const points=new THREE.Points(geo,new THREE.PointsMaterial({color:new THREE.Color(color),size:0.1,transparent:true,opacity:0.88,sizeAttenuation:true,blending:THREE.AdditiveBlending,depthWrite:false}));
+  scene.add(points);
+  const orbs=[];
+  for(let i=0;i<4;i++){const m=new THREE.Mesh(new THREE.SphereGeometry(0.11,12,12),new THREE.MeshBasicMaterial({color:new THREE.Color(color),transparent:true,opacity:0.4,blending:THREE.AdditiveBlending,depthWrite:false}));scene.add(m);orbs.push(m);}
+  const lineGeo=new THREE.BufferGeometry();
+  const line=new THREE.Line(lineGeo,new THREE.LineBasicMaterial({color:new THREE.Color(color),transparent:true,opacity:0.45,blending:THREE.AdditiveBlending}));
+  scene.add(line);
+  // Amber gripper glow mesh — visible only during bilateral grip phases
+  const gripGlow=new THREE.Mesh(new THREE.SphereGeometry(0.18,12,12),new THREE.MeshBasicMaterial({color:0xffaa00,transparent:true,opacity:0,blending:THREE.AdditiveBlending,depthWrite:false}));
+  scene.add(gripGlow);
+  return{geo,points,orbs,lineGeo,line,gripGlow};
+}
+
+const leftObj=createArmObjects('#3b82f6'), rightObj=createArmObjects('#f97316');
+
+const AC=65,ambGeo=new THREE.BufferGeometry(),ambPos=new Float32Array(AC*3),ambSpd=new Float32Array(AC);
+for(let i=0;i<AC;i++){ambPos[i*3]=(Math.random()-.5)*12;ambPos[i*3+1]=Math.random()*7;ambPos[i*3+2]=(Math.random()-.5)*12;ambSpd[i]=0.15+Math.random()*0.45;}
+ambGeo.setAttribute('position',new THREE.BufferAttribute(ambPos,3));
+scene.add(new THREE.Points(ambGeo,new THREE.PointsMaterial({color:0x4488aa,size:0.04,transparent:true,opacity:0.30,sizeAttenuation:true,blending:THREE.AdditiveBlending,depthWrite:false})));
+
+function updateArm(obj,pins,offsetX,t){
+  const kp=computeArmKeyPoints(pins,offsetX),pts=buildArmPoints(kp),arr=obj.geo.attributes.position.array;
+  for(let i=0;i<PC;i++){const pt=pts[i%pts.length],j=Math.sin(t*2.0+i*0.5)*0.006;arr[i*3]=pt.x+j;arr[i*3+1]=pt.y+j;arr[i*3+2]=pt.z+j;}
+  obj.geo.attributes.position.needsUpdate=true;
+  [kp.baseTop,kp.elbowPos,kp.wristPos,kp.clawBase].forEach((pos,i)=>{obj.orbs[i].position.copy(pos);const p=0.8+Math.sin(t*2.5+i*0.6)*0.28;obj.orbs[i].scale.setScalar(p);obj.orbs[i].material.opacity=0.28+Math.sin(t*2.5+i*0.6)*0.18;});
+  // Amber glow scales with how closed the gripper is; only shows during gripping phases
+  const gripFrac=Math.max(0,1-kp.clawAngle/20);
+  obj.gripGlow.position.copy(kp.clawBase);
+  obj.gripGlow.material.opacity=isGripping?gripFrac*0.55:0;
+  obj.gripGlow.scale.setScalar(0.8+Math.sin(t*4)*0.15);
+  const curve=new THREE.CatmullRomCurve3([kp.baseTop,kp.elbowPos,kp.wristPos,kp.clawBase]);
+  obj.lineGeo.setFromPoints([...curve.getPoints(40),kp.clawBase.clone(),kp.prong1.clone(),kp.clawBase.clone(),kp.prong2.clone()]);
+}
+
+let lastTime=performance.now();
+function animate(){
+  requestAnimationFrame(animate);
+  const now=performance.now(),delta=Math.min((now-lastTime)/1000,0.05); lastTime=now;
+  // Faster smoothing factor for coordinated task (exp(-40) vs exp(-8) in dashboard_3)
+  const smooth=1-Math.exp(-40*delta);
+  for(const pin in targetAngles) currentDisplayAngles[pin]+=(targetAngles[pin]-currentDisplayAngles[pin])*smooth;
+  Object.assign(servoAngles,currentDisplayAngles);
+  updateCamera(delta);
+  updateArm(leftObj,LEFT_PINS,-4,now/1000); updateArm(rightObj,RIGHT_PINS,4,now/1000);
+  const aArr=ambGeo.attributes.position.array;
+  for(let i=0;i<AC;i++){aArr[i*3+1]+=ambSpd[i]*delta*0.28;aArr[i*3]+=Math.sin(now/1000*0.45+i)*delta*0.045;aArr[i*3+2]+=Math.cos(now/1000*0.30+i)*delta*0.045;if(aArr[i*3+1]>7.5){aArr[i*3+1]=-0.5;aArr[i*3]=(Math.random()-.5)*12;aArr[i*3+2]=(Math.random()-.5)*12;}}
+  ambGeo.attributes.position.needsUpdate=true;
+  updateBars(); renderer.render(scene,camera);
+}
+animate();
+
+// Polling — recursive setTimeout prevents network backup during high-frequency LERP telemetry
+const badge=document.getElementById('connection-badge');
+const syncBadge=document.getElementById('sync-badge');
+const actionEl=document.getElementById('action-display');
+const interFill=document.getElementById('strip-inter');
+
+async function pollFlask(){
+  try{
+    const data=await(await fetch('/data')).json();
+    for(const[k,v]of Object.entries(data.angles)){const p=parseInt(k);if(!isNaN(p))targetAngles[p]=v;}
+    const action=data.action||'Standing by...';
+    actionEl.innerText=action;
+    isSyncMode=action.includes('Both arms')||action.includes('Holding')||action.includes('System Ready');
+    isGripping=action==='Both arms grabbing'||action==='Both arms lifting'||action==='Holding position'||action==='Both arms placing';
+    syncBadge.classList.toggle('visible',isSyncMode);
+    actionEl.classList.toggle('sync',isSyncMode);
+    interFill.classList.toggle('gripping',isGripping);
+    badge.style.color='#00ff88';badge.style.borderColor='#00ff88';badge.style.textShadow='0 0 8px #00ff88';
+    badge.innerText='🟢 LIVE — Physical Arms Connected';
+  }catch(e){
+    badge.style.color='#ff4444';badge.style.borderColor='#ff4444';badge.style.textShadow='0 0 8px #ff4444';
+    badge.innerText='🔴 Waiting for Flask server...';actionEl.innerText='Disconnected';
+    actionEl.classList.remove('sync');syncBadge.classList.remove('visible');interFill.classList.remove('gripping');
+    Object.assign(targetAngles,HOME);Object.assign(currentDisplayAngles,HOME);
+  }
+  // Schedules next request ONLY after current request resolves — prevents queue backup
+  setTimeout(pollFlask,16);
+}
+pollFlask();
+
+// Chart.js trajectory
+function dB(xyz,ox){const dx=xyz[0]-ox;return Math.sqrt(dx*dx+xyz[1]*xyz[1]+xyz[2]*xyz[2]);}
+function iG(l,r){const dx=l[0]-r[0],dy=l[1]-r[1],dz=l[2]-r[2];return Math.sqrt(dx*dx+dy*dy+dz*dz);}
+function sp(c,mn,mx){if(c==null||mn==null||mx==null)return 0;const s=mx-mn;if(s<1e-9)return 50;return Math.min(100,Math.max(0,((c-mn)/s)*100));}
+
+const cOpts={responsive:true,maintainAspectRatio:false,animation:false,parsing:false,
+  scales:{x:{type:'linear',title:{display:true,text:'t (s)',color:'#555'},ticks:{color:'#8899aa'},grid:{color:'#1a2535'},border:{color:'#1a2535'}},
+          y:{title:{display:true,text:'Value',color:'#555'},ticks:{color:'#8899aa'},grid:{color:'#1a2535'},border:{color:'#1a2535'}}},
+  plugins:{legend:{labels:{color:'#8899aa',boxWidth:12,font:{family:"'Courier New',monospace",size:10}}}}};
+function ds(l,c,f){return{label:l,data:[],borderColor:c,backgroundColor:f||'transparent',borderWidth:1.5,pointRadius:0,tension:0.12,fill:!!f};}
+
+let cL,cR,cI,cZ;
+function initCharts(){
+  if(cL)return;
+  cL=new Chart(document.getElementById('chart-left-dist'),{type:'line',data:{datasets:[ds('Left dist','#00ff88','rgba(0,255,136,0.06)')]},options:{...cOpts}});
+  cR=new Chart(document.getElementById('chart-right-dist'),{type:'line',data:{datasets:[ds('Right dist','#ff8844','rgba(255,136,68,0.06)')]},options:{...cOpts}});
+  cI=new Chart(document.getElementById('chart-inter-dist'),{type:'line',data:{datasets:[ds('Separation','#eab308','rgba(234,179,8,0.06)')]},options:{...cOpts}});
+  cZ=new Chart(document.getElementById('chart-z'),{type:'line',data:{datasets:[ds('Left Y','#3b82f6'),ds('Right Y','#f97316')]},options:{...cOpts}});
+}
+
+async function pollTrajectory(){
+  initCharts();
+  try{
+    const tr=await(await fetch('/trajectory')).json();
+    const t=tr.t||[],lg=tr.left_gripper||[],rg=tr.right_gripper||[],n=Math.min(t.length,lg.length,rg.length);
+    const dL=[],dR=[],dI=[];
+    for(let i=0;i<n;i++){dL.push(dB(lg[i],-4));dR.push(dB(rg[i],4));dI.push(iG(lg[i],rg[i]));}
+    const mk=g=>Array.from({length:n},(_,i)=>({x:t[i],y:g(i)}));
+    cL.data.datasets[0].data=mk(i=>dL[i]);cR.data.datasets[0].data=mk(i=>dR[i]);
+    cI.data.datasets[0].data=mk(i=>dI[i]);cZ.data.datasets[0].data=mk(i=>lg[i][1]);cZ.data.datasets[1].data=mk(i=>rg[i][1]);
+    cL.update('none');cR.update('none');cI.update('none');cZ.update('none');
+    document.getElementById('metric-actions').innerText=String((tr.actions||[]).length);
+    document.getElementById('metric-samples').innerText=String(n);
+    document.getElementById('metric-elapsed').innerText=(tr.mission_started&&n>0)?t[n-1].toFixed(2):'—';
+    if(n===0){['strip-left','strip-right','strip-inter'].forEach(id=>document.getElementById(id).style.width='0%');}
+    else{
+      const mL=Math.min(...dL),xL=Math.max(...dL),mR=Math.min(...dR),xR=Math.max(...dR),mI=Math.min(...dI),xI=Math.max(...dI);
+      document.getElementById('strip-left').style.width=sp(dL[n-1],mL,xL)+'%';
+      document.getElementById('strip-right').style.width=sp(dR[n-1],mR,xR)+'%';
+      document.getElementById('strip-inter').style.width=sp(dI[n-1],mI,xI)+'%';
+    }
+  }catch(e){}
+}
+setInterval(pollTrajectory,250); pollTrajectory();
+</script>
+</body>
+</html>
